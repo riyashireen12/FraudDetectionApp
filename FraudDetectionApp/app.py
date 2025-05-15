@@ -1,90 +1,96 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import pickle
 from sklearn.preprocessing import RobustScaler
 
-# Load the model and scaler
-with open('xgb_model.pkl', 'rb') as f:
-    model = pickle.load(f)
+# App Configuration
+st.set_page_config(page_title="Fraud Detection", layout="wide")
+
+# Load Model and Scaler
+@st.cache_resource
+def load_artifacts():
+    try:
+        with open('xgb_model.pkl', 'rb') as f:
+            model = pickle.load(f)
+        with open('scaler.pkl', 'rb') as f:
+            scaler = pickle.load(f)
+        return model, scaler
+    except Exception as e:
+        st.error(f"Error loading model files: {str(e)}")
+        st.stop()
+
+model, scaler = load_artifacts()
+
+# Input Form
+st.sidebar.header("Transaction Details")
+
+def get_user_input():
+    input_data = {'Time': st.sidebar.number_input('Time (seconds)', min_value=0),
+                 'Amount': st.sidebar.number_input('Amount', min_value=0.0, format="%.2f")}
     
-with open('scaler.pkl', 'rb') as f:
-    scaler = pickle.load(f)
-
-# Streamlit app
-st.title('Credit Card Fraud Detection')
-
-st.write("""
-This app predicts whether a credit card transaction is fraudulent using machine learning.
-""")
-
-# Sidebar for user input
-st.sidebar.header('Transaction Details')
-
-# Create input fields for all V features and Time/Amount
-def user_input_features():
-    v_features = {}
+    # Add V1-V28 features
     for i in range(1, 29):
-        v_features[f'V{i}'] = st.sidebar.slider(f'V{i}', -20.0, 20.0, 0.0)
+        input_data[f'V{i}'] = st.sidebar.slider(f'V{i}', -20.0, 20.0, 0.0)
     
-    time = st.sidebar.number_input('Time (seconds since first transaction)', min_value=0)
-    amount = st.sidebar.number_input('Amount', min_value=0.0, format="%.2f")
-    
-    data = {
-        'Time': time,
-        'Amount': amount,
-        **v_features
-    }
-    
-    features = pd.DataFrame(data, index=[0])
-    return features
+    return pd.DataFrame(input_data, index=[0])
 
-input_df = user_input_features()
-
-# Preprocess the input
+# Preprocessing
 def preprocess_input(df):
-    # Scale Time and Amount
-    df['scaled_amount'] = scaler.transform(df['Amount'].values.reshape(-1,1))
-    df['scaled_time'] = scaler.transform(df['Time'].values.reshape(-1,1))
+    try:
+        # Scale Time and Amount
+        df['scaled_amount'] = scaler.transform(df[['Amount']])
+        df['scaled_time'] = scaler.transform(df[['Time']])
+        
+        # Reorder columns to match training data
+        features = [f'V{i}' for i in range(1,29)] + ['scaled_amount', 'scaled_time']
+        return df[features]
+    except Exception as e:
+        st.error(f"Preprocessing error: {str(e)}")
+        st.stop()
+
+# Prediction
+def make_prediction(features):
+    try:
+        proba = model.predict_proba(features)[0][1] * 100
+        prediction = model.predict(features)[0]
+        return prediction, proba
+    except Exception as e:
+        st.error(f"Prediction error: {str(e)}")
+        st.stop()
+
+# Main App
+def main():
+    st.title("Credit Card Fraud Detection")
     
-    # Drop original Time and Amount
-    df.drop(['Time', 'Amount'], axis=1, inplace=True)
+    # User Input
+    input_df = get_user_input()
     
-    # Reorder columns to match training data
-    cols = ['V1', 'V2', 'V3', 'V4', 'V5', 'V6', 'V7', 'V8', 'V9', 'V10',
-            'V11', 'V12', 'V13', 'V14', 'V15', 'V16', 'V17', 'V18', 'V19',
-            'V20', 'V21', 'V22', 'V23', 'V24', 'V25', 'V26', 'V27', 'V28',
-            'scaled_amount', 'scaled_time']
+    # Display Input
+    st.subheader("Transaction Features")
+    st.write(input_df)
     
-    df = df[cols]
-    return df
+    # Preprocess and Predict
+    if st.sidebar.button("Check Fraud Risk"):
+        features = preprocess_input(input_df.copy())
+        prediction, fraud_prob = make_prediction(features)
+        
+        # Show Results
+        st.subheader("Result")
+        st.metric("Fraud Probability", f"{fraud_prob:.2f}%")
+        
+        if prediction == 1:
+            st.error("ALERT: High fraud risk detected!")
+        else:
+            st.success("Transaction appears legitimate")
+    
+    # Model Info
+    st.sidebar.markdown("---")
+    st.sidebar.info("""
+    **Model Details**:
+    - Algorithm: XGBoost
+    - Trained on: Kaggle Credit Card Dataset
+    - Last updated: May 2025
+    """)
 
-processed_df = preprocess_input(input_df.copy())
-
-# Display user input
-st.subheader('Transaction Features')
-st.write(processed_df)
-
-# Make prediction
-prediction = model.predict(processed_df)
-prediction_proba = model.predict_proba(processed_df)
-
-st.subheader('Prediction')
-fraud_prob = prediction_proba[0][1] * 100
-st.write(f'Probability of being fraudulent: {fraud_prob:.2f}%')
-
-if prediction[0] == 1:
-    st.error('Warning: This transaction is predicted to be FRAUDULENT!')
-else:
-    st.success('This transaction is predicted to be LEGITIMATE.')
-
-# Add some explanations
-st.subheader('Model Information')
-st.write("""
-This model uses XGBoost trained on a highly imbalanced dataset of credit card transactions.
-The model was trained on resampled data to better detect fraudulent cases.
-""")
-
-# Add ROC curve image
-st.subheader('Model Performance')
-st.image('roc_curve.png', caption='ROC Curve')
+if __name__ == "__main__":
+    main()
